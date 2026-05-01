@@ -1,7 +1,6 @@
 pipeline{
     agent any
     tools{
-        jdk 'jdk'
         nodejs 'nodejs'
     }
     environment {
@@ -62,7 +61,7 @@ pipeline{
         }
         stage("TRIVY"){
             steps{
-                sh "trivy image sreedhar8897/reddit:latest > trivy.txt"
+                sh "trivy image sreedhar8897/reddit:${BUILD_NUMBER} > trivy.txt"
             }
         }
         stage('Update Deployment file') {
