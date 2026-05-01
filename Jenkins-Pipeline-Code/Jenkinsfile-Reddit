@@ -1,87 +1,104 @@
-pipeline{
+pipeline {
     agent any
-    tools{
+
+    tools {
         nodejs 'nodejs'
     }
+
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        SCANNER_HOME = tool 'sonar-scanner'
+        DOCKER_IMAGE = "sreedhar8897/reddit"
     }
+
     stages {
-        stage('clean workspace'){
-            steps{
+
+        stage('Clean Workspace') {
+            steps {
                 cleanWs()
             }
         }
-        stage('Checkout from Git'){
-            steps{
+
+        stage('Checkout from Git') {
+            steps {
                 git branch: 'main', url: 'https://github.com/uniquesreedhar/Reddit-Project.git'
             }
         }
-        stage('Install Dependencies') {
+
+        stage("Sonarqube Analysis") {
             steps {
-                sh "npm install"
-            }
-        }
-        stage("Sonarqube Analysis "){
-            steps{
                 withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Reddit \
-                    -Dsonar.projectKey=Reddit '''
+                    sh """
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=Reddit \
+                        -Dsonar.projectKey=Reddit
+                    """
                 }
             }
         }
-        stage("quality gate"){
-           steps {
+
+        stage("Quality Gate") {
+            steps {
                 script {
                     waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
                 }
             }
         }
+
         stage('OWASP FS SCAN') {
             steps {
                 dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
+
         stage('TRIVY FS SCAN') {
             steps {
                 sh "trivy fs . > trivyfs.txt"
             }
         }
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){
-                       sh "docker build -t reddit ."
-                       sh "docker tag reddit sreedhar8897/reddit:${BUILD_NUMBER} "
-                       sh "docker push sreedhar8897/reddit:${BUILD_NUMBER} "
+
+        stage("Docker Build & Push") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh "docker build -t ${DOCKER_IMAGE}:latest ."
+                        sh "docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                        sh "docker push ${DOCKER_IMAGE}:latest"
+                        sh "docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}"
                     }
                 }
             }
         }
-        stage("TRIVY"){
-            steps{
-                sh "trivy image sreedhar8897/reddit:${BUILD_NUMBER} > trivy.txt"
+
+        stage("TRIVY IMAGE SCAN") {
+            steps {
+                sh "trivy image ${DOCKER_IMAGE}:${BUILD_NUMBER} > trivy.txt"
             }
         }
-        stage('Update Deployment file') {
+
+        stage('Update Deployment File') {
             environment {
                 GIT_REPO_NAME = "Reddit-Project"
                 GIT_USER_NAME = "uniquesreedhar"
             }
+
             steps {
-                dir('K8s'){
+                dir('K8s') {
                     withCredentials([string(credentialsId: 'githubcred', variable: 'GITHUB_TOKEN')]) {
                         sh '''
-                            git config user.email "madithatisreedhar123@gmail.com"
+                            git config user.email "your-email@example.com"
                             git config user.name "uniquesreedhar"
+
                             BUILD_NUMBER=${BUILD_NUMBER}
                             echo $BUILD_NUMBER
+
                             imageTag=$(grep -oP '(?<=reddit:)[^ ]+' deployment.yml)
                             echo $imageTag
+
                             sed -i "s/reddit:${imageTag}/reddit:${BUILD_NUMBER}/" deployment.yml
+
                             git add deployment.yml
-                            git commit -m "Update deployment Image to version \${BUILD_NUMBER}"
+                            git commit -m "Update deployment image to version ${BUILD_NUMBER}" || true
                             git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:main
                         '''
                     }
