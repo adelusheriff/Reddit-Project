@@ -3,11 +3,19 @@ pipeline {
 
     tools {
         nodejs 'nodejs'
+        jdk 'jdk'
     }
 
     environment {
         SCANNER_HOME = tool 'sonar-scanner'
+        APP_NAME = "reddit"
         DOCKER_IMAGE = "sreedhar8897/reddit"
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     stages {
@@ -18,92 +26,129 @@ pipeline {
             }
         }
 
-        stage('Checkout from Git') {
+        stage('Checkout Code') {
             steps {
-                git branch: 'main', url: 'https://github.com/uniquesreedhar/Reddit-Project.git'
+                git branch: 'main',
+                url: 'https://github.com/uniquesreedhar/Reddit-Project.git'
             }
         }
 
-        stage("Sonarqube Analysis") {
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    npm ci || npm install
+                '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonar-server') {
                     sh """
-                        $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=Reddit \
-                        -Dsonar.projectKey=Reddit
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=Reddit \
+                        -Dsonar.projectName=Reddit
                     """
                 }
             }
         }
 
-        stage("Quality Gate") {
+        stage('Quality Gate') {
             steps {
                 script {
-                    waitForQualityGate abortPipeline: true, credentialsId: 'sonar-token'
-                }
-            }
-        }
-
-        stage('OWASP FS SCAN') {
-            steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
-
-        stage('TRIVY FS SCAN') {
-            steps {
-                sh "trivy fs . > trivyfs.txt"
-            }
-        }
-
-        stage("Docker Build & Push") {
-            steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
-                        sh "docker build -t ${DOCKER_IMAGE}:latest ."
-                        sh "docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${BUILD_NUMBER}"
-                        sh "docker push ${DOCKER_IMAGE}:latest"
-                        sh "docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
                     }
                 }
             }
         }
 
-        stage("TRIVY IMAGE SCAN") {
+        stage('Dependency Scan (OWASP)') {
             steps {
-                sh "trivy image ${DOCKER_IMAGE}:${BUILD_NUMBER} > trivy.txt"
+                timeout(time: 5, unit: 'MINUTES') {
+                    dependencyCheck additionalArguments: '''
+                        --scan ./ 
+                        --disableYarnAudit 
+                        --disableNodeAudit
+                    ''', odcInstallation: 'DP-Check'
+
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
             }
         }
 
-        stage('Update Deployment File') {
-            environment {
-                GIT_REPO_NAME = "Reddit-Project"
-                GIT_USER_NAME = "uniquesreedhar"
+        stage('Filesystem Scan (Trivy)') {
+            steps {
+                sh '''
+                    trivy fs --exit-code 0 --severity HIGH,CRITICAL . > trivy-fs.txt
+                '''
             }
+        }
 
+        stage('Docker Build') {
+            steps {
+                script {
+                    sh """
+                        docker build -t ${APP_NAME} .
+                    """
+                }
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh """
+                            docker tag ${APP_NAME} ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                            docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Image Scan (Trivy)') {
+            steps {
+                sh """
+                    trivy image --exit-code 0 --severity HIGH,CRITICAL \
+                    ${DOCKER_IMAGE}:${BUILD_NUMBER} > trivy-image.txt
+                """
+            }
+        }
+
+        stage('Update K8s Deployment') {
             steps {
                 dir('K8s') {
                     withCredentials([string(credentialsId: 'githubcred', variable: 'GITHUB_TOKEN')]) {
                         sh '''
-                            git config user.email "your-email@example.com"
-                            git config user.name "uniquesreedhar"
+                            git config user.email "jenkins@ci.com"
+                            git config user.name "jenkins"
 
-                            BUILD_NUMBER=${BUILD_NUMBER}
-                            echo $BUILD_NUMBER
-
-                            imageTag=$(grep -oP '(?<=reddit:)[^ ]+' deployment.yml)
-                            echo $imageTag
-
-                            sed -i "s/reddit:${imageTag}/reddit:${BUILD_NUMBER}/" deployment.yml
+                            sed -i "s|image: .*|image: sreedhar8897/reddit:${BUILD_NUMBER}|g" deployment.yml
 
                             git add deployment.yml
-                            git commit -m "Update deployment image to version ${BUILD_NUMBER}" || true
-                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:main
+                            git commit -m "Update image to ${BUILD_NUMBER}" || true
+
+                            git push https://${GITHUB_TOKEN}@github.com/uniquesreedhar/Reddit-Project.git HEAD:main
                         '''
                     }
                 }
             }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '**/*.txt', allowEmptyArchive: true
+        }
+
+        failure {
+            echo "Pipeline failed. Check logs."
+        }
+
+        success {
+            echo "Pipeline completed successfully."
         }
     }
 }
