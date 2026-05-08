@@ -11,3 +11,16 @@ crash.log
 # OS stuff
 .DS_Store
 Thumbs.db
+
+
+node_modules/
+.next/
+.terraform/
+*.tfstate
+*.tfstate.backup
+.scannerwork/
+coverage/
+.env
+.env.local
+.DS_Store
+*.log
